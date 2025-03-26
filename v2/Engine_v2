@@ -1,0 +1,401 @@
+import yfinance as yf
+import pandas as pd
+import matplotlib.pyplot as plt
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+import csv
+from datetime import datetime
+import os
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+
+# Helper function to get full ticker based on market selection
+def get_full_ticker(ticker, market):
+    ticker = ticker.upper()
+    if market == "NSE":
+        if not ticker.endswith(".NS"):
+            ticker += ".NS"
+    elif market == "BSE":
+        if not ticker.endswith(".BO"):
+            ticker += ".BO"
+    return ticker
+
+# File paths for persistence and logging
+PORTFOLIO_CSV = "portfolio.csv"
+LOG_CSV = "update_log.csv"
+
+# Initialize log file with header if it doesn't exist
+if not os.path.exists(LOG_CSV):
+    with open(LOG_CSV, mode="w", newline="") as logfile:
+        writer = csv.writer(logfile)
+        writer.writerow(["Sl.No", "Date", "Time", "Share Name", "Ticker", "Market", "Price at log", "Additional Info"])
+
+# Function to get next serial number for log entries
+def get_next_serial():
+    if os.path.exists(LOG_CSV):
+        with open(LOG_CSV, "r") as logfile:
+            reader = csv.reader(logfile)
+            rows = list(reader)
+            return len(rows)  # header included, so first log will be row2
+    else:
+        return 1
+
+# Custom logging function per the new format
+def log_update(share_name, ticker, market, price_at_log, additional_info):
+    sl_no = get_next_serial()  # Auto-increment serial based on file rows
+    now = datetime.now()
+    date_str = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M:%S")
+    log_entry = [sl_no, date_str, time_str, share_name, ticker, market, price_at_log, additional_info]
+    with open(LOG_CSV, mode="a", newline="") as logfile:
+        writer = csv.writer(logfile)
+        writer.writerow(log_entry)
+
+# Function to save the portfolio to CSV
+def save_portfolio_csv(portfolio):
+    with open(PORTFOLIO_CSV, mode="w", newline="") as csvfile:
+        writer = csv.writer(csvfile)
+        writer.writerow(["Ticker", "Shares", "Buy Price", "Market"])
+        for full_ticker, data in portfolio.items():
+            writer.writerow([full_ticker, data['shares'], data['buy_price'], data['market']])
+
+# Backend: StockManager class
+class StockManager:
+    def __init__(self):
+        self.portfolio = {}  # Format: {full_ticker: {shares, buy_price, market}}
+        if os.path.exists(PORTFOLIO_CSV):
+            self.load_portfolio_csv()
+
+    def load_portfolio_csv(self):
+        try:
+            df = pd.read_csv(PORTFOLIO_CSV)
+            for index, row in df.iterrows():
+                self.portfolio[row['Ticker']] = {
+                    'shares': float(row['Shares']),
+                    'buy_price': float(row['Buy Price']),
+                    'market': row['Market']
+                }
+        except Exception as e:
+            print(f"Error loading portfolio CSV: {e}")
+
+    def add_stock(self, ticker, shares, buy_price, market):
+        full_ticker = get_full_ticker(ticker, market)
+        self.portfolio[full_ticker] = {'shares': shares, 'buy_price': buy_price, 'market': market}
+        save_portfolio_csv(self.portfolio)
+        log_update(ticker.upper(), full_ticker, market, buy_price, f"Added with {shares} shares")
+    
+    def fetch_live_price(self, full_ticker):
+        try:
+            stock = yf.Ticker(full_ticker)
+            price = stock.history(period='1d')['Close'].iloc[-1]
+            return price
+        except Exception as e:
+            print(f"Error fetching live price for {full_ticker}: {e}")
+            return None
+    
+    def portfolio_value(self):
+        total_value = 0
+        for full_ticker, data in self.portfolio.items():
+            live_price = self.fetch_live_price(full_ticker)
+            if live_price is not None:
+                total_value += live_price * data['shares']
+        return total_value
+    
+    def recommend_trade(self, ticker, market):
+        full_ticker = get_full_ticker(ticker, market)
+        try:
+            stock = yf.Ticker(full_ticker)
+            hist = stock.history(period='3mo')
+            if hist.empty or len(hist) < 50:
+                recommendation = "Not enough data for recommendation."
+            else:
+                hist['50_MA'] = hist['Close'].rolling(window=50).mean()
+                latest_price = hist['Close'].iloc[-1]
+                moving_avg = hist['50_MA'].iloc[-1]
+                if latest_price > moving_avg:
+                    recommendation = "Consider buying – the trend is upward!"
+                else:
+                    recommendation = "Consider selling – price is below the moving average."
+                log_update(ticker.upper(), full_ticker, market, latest_price, f"Trade recommendation: {recommendation}")
+            return recommendation
+        except Exception as e:
+            error_msg = f"Error in recommendation: {e}"
+            log_update(ticker.upper(), full_ticker, market, "N/A", error_msg)
+            return error_msg
+    
+    def get_stock_chart_data(self, ticker, market):
+        full_ticker = get_full_ticker(ticker, market)
+        try:
+            stock = yf.Ticker(full_ticker)
+            hist = stock.history(period='6mo')
+            return hist, full_ticker
+        except Exception as e:
+            messagebox.showerror("Error", f"Error fetching chart data: {e}")
+            return None, full_ticker
+
+# Frontend: Professional GUI using Tkinter and ttk
+class StockManagerGUI:
+    def __init__(self, master):
+        self.master = master
+        self.master.title("Professional Stock Management Dashboard")
+        self.stock_manager = StockManager()
+        self.master.geometry("900x600")
+        
+        # Use ttk styling for a modern look
+        self.style = ttk.Style()
+        self.style.theme_use('clam')
+        
+        # Create a Notebook for multiple tabs
+        self.notebook = ttk.Notebook(master)
+        self.notebook.pack(expand=True, fill='both')
+        
+        # Tab 1: Dashboard (Add Stock and Portfolio)
+        self.dashboard_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.dashboard_frame, text="Dashboard")
+        self.create_dashboard(self.dashboard_frame)
+        
+        # Tab 2: Trade Tools (Embedded Charting and Recommendation)
+        self.trade_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.trade_frame, text="Trade Tools")
+        self.create_trade_tools(self.trade_frame)
+        
+        # Tab 3: Portfolio Analytics (Portfolio Value, Pie Chart & P/L Table)
+        self.analytics_frame = ttk.Frame(self.notebook)
+        self.notebook.add(self.analytics_frame, text="Analytics")
+        self.create_analytics(self.analytics_frame)
+    
+    def create_dashboard(self, frame):
+        # Section for adding stocks
+        add_frame = ttk.LabelFrame(frame, text="Add Stock")
+        add_frame.pack(padx=10, pady=10, fill="x")
+        
+        ttk.Label(add_frame, text="Ticker:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.ticker_entry = ttk.Entry(add_frame, width=12)
+        self.ticker_entry.grid(row=0, column=1, padx=5, pady=5)
+        
+        ttk.Label(add_frame, text="Shares:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
+        self.shares_entry = ttk.Entry(add_frame, width=10)
+        self.shares_entry.grid(row=0, column=3, padx=5, pady=5)
+        
+        ttk.Label(add_frame, text="Buy Price:").grid(row=0, column=4, padx=5, pady=5, sticky="w")
+        self.buy_price_entry = ttk.Entry(add_frame, width=10)
+        self.buy_price_entry.grid(row=0, column=5, padx=5, pady=5)
+        
+        ttk.Label(add_frame, text="Market:").grid(row=0, column=6, padx=5, pady=5, sticky="w")
+        self.market_var = tk.StringVar(value="NSE")
+        market_menu = ttk.OptionMenu(add_frame, self.market_var, "NSE", "NSE", "BSE")
+        market_menu.grid(row=0, column=7, padx=5, pady=5)
+        
+        add_button = ttk.Button(add_frame, text="Add Stock", command=self.add_stock)
+        add_button.grid(row=0, column=8, padx=10, pady=5)
+        
+        # Section for portfolio display using Treeview
+        portfolio_frame = ttk.LabelFrame(frame, text="Portfolio")
+        portfolio_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        
+        columns = ("Ticker", "Shares", "Buy Price", "Market")
+        self.portfolio_tree = ttk.Treeview(portfolio_frame, columns=columns, show="headings", height=10)
+        for col in columns:
+            self.portfolio_tree.heading(col, text=col)
+            self.portfolio_tree.column(col, anchor="center", width=100)
+        self.portfolio_tree.pack(fill="both", expand=True, padx=10, pady=10)
+        self.update_portfolio_display()
+    
+    def create_trade_tools(self, frame):
+        # Input frame for ticker and market
+        input_frame = ttk.LabelFrame(frame, text="Chart Parameters")
+        input_frame.pack(padx=10, pady=10, fill="x")
+        
+        ttk.Label(input_frame, text="Ticker:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.chart_ticker_entry = ttk.Entry(input_frame, width=12)
+        self.chart_ticker_entry.grid(row=0, column=1, padx=5, pady=5)
+        
+        ttk.Label(input_frame, text="Market:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
+        self.chart_market_var = tk.StringVar(value="NSE")
+        chart_market_menu = ttk.OptionMenu(input_frame, self.chart_market_var, "NSE", "NSE", "BSE")
+        chart_market_menu.grid(row=0, column=3, padx=5, pady=5)
+        
+        display_button = ttk.Button(input_frame, text="Display Chart", command=self.display_chart)
+        display_button.grid(row=0, column=4, padx=10, pady=5)
+        
+        # Placeholder for Trade Recommendation
+        rec_frame = ttk.LabelFrame(frame, text="Trade Recommendation")
+        rec_frame.pack(padx=10, pady=10, fill="x")
+        self.rec_label = ttk.Label(rec_frame, text="No recommendation available. Enter ticker & market.", font=("Arial", 10, "italic"))
+        self.rec_label.pack(padx=10, pady=10)
+        
+        # Create a frame for the matplotlib figure (chart)
+        self.figure_frame = ttk.LabelFrame(frame, text="Stock Chart")
+        self.figure_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        
+        # Create a placeholder figure
+        self.fig, self.ax = plt.subplots(figsize=(8, 4))
+        self.ax.set_title("No chart available")
+        self.ax.text(0.5, 0.5, "Enter ticker and market to display chart", 
+                     horizontalalignment='center', verticalalignment='center', transform=self.ax.transAxes)
+        self.ax.set_xticks([]); self.ax.set_yticks([])
+        
+        # Embed the figure in the Tkinter frame
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self.figure_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(fill="both", expand=True)
+    
+    def create_analytics(self, frame):
+        # Analytics frame will include:
+        # 1. A label showing overall portfolio value and profit/loss.
+        # 2. An embedded pie chart for share contributions.
+        # 3. A table (Treeview) showing profit/loss per share.
+        self.analytics_main_frame = ttk.Frame(frame)
+        self.analytics_main_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        
+        # Top: Overall portfolio summary
+        self.summary_label = ttk.Label(self.analytics_main_frame, text="Portfolio Summary will appear here", font=("Arial", 12, "bold"))
+        self.summary_label.pack(pady=5)
+        
+        # Middle: Pie chart for share contribution
+        self.pie_frame = ttk.LabelFrame(self.analytics_main_frame, text="Portfolio Composition")
+        self.pie_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        self.pie_fig, self.pie_ax = plt.subplots(figsize=(4, 4))
+        self.pie_ax.text(0.5, 0.5, "No data", horizontalalignment='center', verticalalignment='center')
+        self.pie_canvas = FigureCanvasTkAgg(self.pie_fig, master=self.pie_frame)
+        self.pie_canvas.draw()
+        self.pie_canvas.get_tk_widget().pack(fill="both", expand=True)
+        
+        # Bottom: Table for individual stock P/L
+        self.table_frame = ttk.LabelFrame(self.analytics_main_frame, text="Profit/Loss Details")
+        self.table_frame.pack(padx=10, pady=10, fill="both", expand=True)
+        table_columns = ("Ticker", "Shares", "Buy Price", "Current Price", "Current Value", "P/L", "P/L %")
+        self.pl_tree = ttk.Treeview(self.table_frame, columns=table_columns, show="headings", height=8)
+        for col in table_columns:
+            self.pl_tree.heading(col, text=col)
+            self.pl_tree.column(col, anchor="center", width=100)
+        self.pl_tree.pack(fill="both", expand=True)
+        
+        # Button to update analytics
+        update_button = ttk.Button(self.analytics_main_frame, text="Calculate Portfolio Analytics", command=self.update_analytics)
+        update_button.pack(pady=10)
+    
+    def add_stock(self):
+        ticker = self.ticker_entry.get().strip()
+        shares = self.shares_entry.get().strip()
+        buy_price = self.buy_price_entry.get().strip()
+        market = self.market_var.get()
+        if not ticker or not shares or not buy_price:
+            messagebox.showwarning("Input Error", "Please fill in all fields.")
+            return
+        try:
+            shares = float(shares)
+            buy_price = float(buy_price)
+        except ValueError:
+            messagebox.showwarning("Input Error", "Shares and Buy Price must be numbers.")
+            return
+        
+        self.stock_manager.add_stock(ticker, shares, buy_price, market)
+        messagebox.showinfo("Success", f"Added {get_full_ticker(ticker, market)} ({market}) to portfolio.")
+        self.ticker_entry.delete(0, tk.END)
+        self.shares_entry.delete(0, tk.END)
+        self.buy_price_entry.delete(0, tk.END)
+        self.update_portfolio_display()
+    
+    def update_portfolio_display(self):
+        for row in self.portfolio_tree.get_children():
+            self.portfolio_tree.delete(row)
+        for full_ticker, data in self.stock_manager.portfolio.items():
+            self.portfolio_tree.insert("", tk.END, values=(full_ticker, data['shares'], data['buy_price'], data['market']))
+    
+    def show_portfolio_value(self):
+        # This button is now replaced by update_analytics in the Analytics tab.
+        value = self.stock_manager.portfolio_value()
+        messagebox.showinfo("Portfolio Value", f"Current Portfolio Value: ₹{value:,.2f}")
+    
+    def display_chart(self):
+        # Get ticker and market input from trade tools tab
+        ticker = self.chart_ticker_entry.get().strip()
+        market = self.chart_market_var.get()
+        if not ticker:
+            messagebox.showwarning("Input Error", "Please enter a ticker.")
+            return
+        
+        # Update trade recommendation placeholder automatically
+        recommendation = self.stock_manager.recommend_trade(ticker, market.upper())
+        self.rec_label.config(text=recommendation)
+        
+        # Fetch chart data
+        hist, full_ticker = self.stock_manager.get_stock_chart_data(ticker, market)
+        if hist is None or hist.empty:
+            messagebox.showerror("Error", f"No data available for {full_ticker}")
+            return
+        
+        # Clear the previous plot and create new plot
+        self.ax.clear()
+        self.ax.plot(hist.index, hist['Close'], label='Close Price', color='blue')
+        self.ax.set_title(f'{full_ticker} Stock Price (Last 6 Months)')
+        self.ax.set_xlabel("Date")
+        self.ax.set_ylabel("Price")
+        self.ax.legend(loc='best')
+        self.ax.grid(True)
+        self.canvas.draw()
+    
+    def update_analytics(self):
+        # For each stock in the portfolio, fetch live price, compute current value and P/L.
+        total_value = 0
+        total_pl = 0
+        pl_data = []  # List of dictionaries for each stock for the table
+        labels = []
+        sizes = []
+        
+        for full_ticker, data in self.stock_manager.portfolio.items():
+            live_price = self.stock_manager.fetch_live_price(full_ticker)
+            if live_price is None:
+                continue
+            shares = data['shares']
+            buy_price = data['buy_price']
+            current_value = live_price * shares
+            pl = (live_price - buy_price) * shares
+            pl_percent = ((live_price - buy_price) / buy_price * 100) if buy_price != 0 else 0
+            
+            total_value += current_value
+            total_pl += pl
+            labels.append(full_ticker)
+            sizes.append(current_value)
+            
+            pl_data.append({
+                "Ticker": full_ticker,
+                "Shares": shares,
+                "Buy Price": f"{buy_price:.2f}",
+                "Current Price": f"{live_price:.2f}",
+                "Current Value": f"{current_value:.2f}",
+                "P/L": f"{pl:.2f}",
+                "P/L %": f"{pl_percent:.2f}%"
+            })
+        
+        # Update the summary label
+        summary_text = f"Total Portfolio Value: ₹{total_value:,.2f} | Total Profit/Loss: ₹{total_pl:,.2f}"
+        self.summary_label.config(text=summary_text)
+        
+        # Update pie chart (if there is data)
+        self.pie_ax.clear()
+        if sizes:
+            self.pie_ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140)
+            self.pie_ax.axis('equal')
+        else:
+            self.pie_ax.text(0.5, 0.5, "No data", horizontalalignment='center', verticalalignment='center')
+        self.pie_canvas.draw()
+        
+        # Update the profit/loss table
+        for row in self.pl_tree.get_children():
+            self.pl_tree.delete(row)
+        for item in pl_data:
+            self.pl_tree.insert("", tk.END, values=(
+                item["Ticker"],
+                item["Shares"],
+                item["Buy Price"],
+                item["Current Price"],
+                item["Current Value"],
+                item["P/L"],
+                item["P/L %"]
+            ))
+
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = StockManagerGUI(root)
+    root.mainloop()
