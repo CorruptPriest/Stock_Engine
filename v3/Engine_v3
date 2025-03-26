@@ -9,6 +9,7 @@ from datetime import datetime
 import os
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
+# ----------------- Helper Functions -----------------
 def get_full_ticker(ticker, market):
     ticker = ticker.upper()
     if market == "NSE":
@@ -19,6 +20,7 @@ def get_full_ticker(ticker, market):
             ticker += ".BO"
     return ticker
 
+# ----------------- File Paths -----------------
 PORTFOLIO_CSV = "portfolio.csv"
 LOG_CSV = "update_log.csv"
 
@@ -27,12 +29,13 @@ if not os.path.exists(LOG_CSV):
         writer = csv.writer(logfile)
         writer.writerow(["Sl.No", "Date", "Time", "Share Name", "Ticker", "Market", "Price at log", "Additional Info"])
 
+# ----------------- Logging -----------------
 def get_next_serial():
     if os.path.exists(LOG_CSV):
         with open(LOG_CSV, "r") as logfile:
             reader = csv.reader(logfile)
             rows = list(reader)
-            return len(rows)
+            return len(rows)  # header included
     else:
         return 1
 
@@ -53,9 +56,10 @@ def save_portfolio_csv(portfolio):
         for full_ticker, data in portfolio.items():
             writer.writerow([full_ticker, data['shares'], data['buy_price'], data['market']])
 
+# ----------------- StockManager -----------------
 class StockManager:
     def __init__(self):
-        self.portfolio = {}
+        self.portfolio = {}  # {full_ticker: {shares, buy_price, market}}
         if os.path.exists(PORTFOLIO_CSV):
             self.load_portfolio_csv()
 
@@ -76,11 +80,17 @@ class StockManager:
         self.portfolio[full_ticker] = {'shares': shares, 'buy_price': buy_price, 'market': market}
         save_portfolio_csv(self.portfolio)
         log_update(ticker.upper(), full_ticker, market, buy_price, f"Added with {shares} shares")
-
+    
+    def delete_stock(self, full_ticker):
+        if full_ticker in self.portfolio:
+            del self.portfolio[full_ticker]
+            save_portfolio_csv(self.portfolio)
+            log_update(full_ticker, full_ticker, "", "", "Deleted stock")
+    
     def fetch_live_price(self, full_ticker):
         try:
             stock = yf.Ticker(full_ticker)
-            hist = stock.history(period='5d')  # last available
+            hist = stock.history(period='5d')  # Use 5 days to get the last available price
             if hist.empty:
                 return None
             price = hist['Close'].iloc[-1]
@@ -88,7 +98,7 @@ class StockManager:
         except Exception as e:
             print(f"Error fetching live price for {full_ticker}: {e}")
             return None
-
+    
     def portfolio_value(self):
         total_value = 0
         for full_ticker, data in self.portfolio.items():
@@ -96,7 +106,7 @@ class StockManager:
             if live_price is not None:
                 total_value += live_price * data['shares']
         return total_value
-
+    
     def recommend_trade(self, ticker, market):
         full_ticker = get_full_ticker(ticker, market)
         try:
@@ -118,7 +128,7 @@ class StockManager:
             error_msg = f"Error in recommendation: {e}"
             log_update(ticker.upper(), full_ticker, market, "N/A", error_msg)
             return error_msg
-
+    
     def get_stock_chart_data(self, ticker, market):
         full_ticker = get_full_ticker(ticker, market)
         try:
@@ -129,122 +139,180 @@ class StockManager:
             messagebox.showerror("Error", f"Error fetching chart data: {e}")
             return None, full_ticker
 
-ctk.set_appearance_mode("Dark")
+# ----------------- CustomTkinter GUI with Sidebar -----------------
+ctk.set_appearance_mode("Light")
 ctk.set_default_color_theme("blue")
 
 class StockManagerGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.title("Professional Stock Management Dashboard")
-        self.geometry("900x600")
+        self.geometry("1000x600")
         self.stock_manager = StockManager()
-
-        self.tabview = ctk.CTkTabview(self, width=880, height=580)
-        self.tabview.pack(padx=10, pady=10, fill="both", expand=True)
-        self.tabview.add("Dashboard")
-        self.tabview.add("Trade Tools")
-        self.tabview.add("Analytics")
-
-        self.create_dashboard(self.tabview.tab("Dashboard"))
-        self.create_trade_tools(self.tabview.tab("Trade Tools"))
-        self.create_analytics(self.tabview.tab("Analytics"))
-
-        # We'll poll the tab name periodically rather than using private variables or events.
-        self.last_tab = None
-        self.check_tab_change()
-
-    def check_tab_change(self):
-        current_tab = self.tabview.get()
-        if current_tab != self.last_tab:
-            self.last_tab = current_tab
-            if current_tab == "Analytics":
-                self.update_analytics()
-        # Check again in half a second (500ms).
-        self.after(500, self.check_tab_change)
-
-    def create_dashboard(self, frame):
+        
+        # Create main layout: Sidebar on left, main content on right
+        self.sidebar_width = 200
+        self.sidebar_expanded = True
+        
+        self.sidebar_frame = ctk.CTkFrame(self, width=self.sidebar_width)
+        self.sidebar_frame.pack(side="left", fill="y")
+        self.sidebar_frame.pack_propagate(False)
+        
+        # Create a separate frame for sidebar buttons
+        self.sidebar_button_frame = ctk.CTkFrame(self.sidebar_frame)
+        self.sidebar_button_frame.pack(fill="both", expand=True)
+        
+        self.btn_dashboard = ctk.CTkButton(self.sidebar_button_frame, text="Dashboard", command=self.show_dashboard, width=180)
+        self.btn_dashboard.pack(pady=(20,10), padx=10)
+        self.btn_trade = ctk.CTkButton(self.sidebar_button_frame, text="Trade Tools", command=self.show_trade_tools, width=180)
+        self.btn_trade.pack(pady=10, padx=10)
+        self.btn_analytics = ctk.CTkButton(self.sidebar_button_frame, text="Analytics", command=self.show_analytics, width=180)
+        self.btn_analytics.pack(pady=10, padx=10)
+        
+        # Collapse button now at the bottom of the sidebar
+        self.btn_toggle = ctk.CTkButton(self.sidebar_frame, text="Collapse", command=self.toggle_sidebar, width=180)
+        self.btn_toggle.pack(side="bottom", pady=10, padx=10)
+        
+        self.main_frame = ctk.CTkFrame(self)
+        self.main_frame.pack(side="left", fill="both", expand=True)
+        
+        # Create frames for each section
+        self.dashboard_content = ctk.CTkFrame(self.main_frame)
+        self.trade_content = ctk.CTkFrame(self.main_frame)
+        self.analytics_content = ctk.CTkFrame(self.main_frame)
+        
+        self.create_dashboard_content(self.dashboard_content)
+        self.create_trade_tools_content(self.trade_content)
+        self.create_analytics_content(self.analytics_content)
+        
+        # Start by showing Dashboard
+        self.show_dashboard()
+    
+    def toggle_sidebar(self):
+        if self.sidebar_expanded:
+            self.sidebar_frame.configure(width=50)
+            self.sidebar_button_frame.pack_forget()
+            self.btn_toggle.configure(text=">")
+            self.sidebar_expanded = False
+        else:
+            self.sidebar_frame.configure(width=self.sidebar_width)
+            self.sidebar_button_frame.pack(fill="both", expand=True)
+            self.btn_toggle.configure(text="Collapse")
+            self.sidebar_expanded = True
+        self.sidebar_frame.update_idletasks()
+    
+    def clear_main_frame(self):
+        for widget in self.main_frame.winfo_children():
+            widget.pack_forget()
+    
+    def show_dashboard(self):
+        self.clear_main_frame()
+        self.dashboard_content.pack(fill="both", expand=True)
+    
+    def show_trade_tools(self):
+        self.clear_main_frame()
+        self.trade_content.pack(fill="both", expand=True)
+    
+    def show_analytics(self):
+        self.clear_main_frame()
+        self.analytics_content.pack(fill="both", expand=True)
+        self.update_analytics()
+    
+    # ----------------- Dashboard Content -----------------
+    def create_dashboard_content(self, frame):
         add_frame = ctk.CTkFrame(frame)
         add_frame.pack(padx=10, pady=10, fill="x")
-
+        
         ctk.CTkLabel(add_frame, text="Ticker:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.ticker_entry = ctk.CTkEntry(add_frame, width=100)
         self.ticker_entry.grid(row=0, column=1, padx=5, pady=5)
-
+        
         ctk.CTkLabel(add_frame, text="Shares:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
         self.shares_entry = ctk.CTkEntry(add_frame, width=80)
         self.shares_entry.grid(row=0, column=3, padx=5, pady=5)
-
+        
         ctk.CTkLabel(add_frame, text="Buy Price:").grid(row=0, column=4, padx=5, pady=5, sticky="w")
         self.buy_price_entry = ctk.CTkEntry(add_frame, width=80)
         self.buy_price_entry.grid(row=0, column=5, padx=5, pady=5)
-
+        
         ctk.CTkLabel(add_frame, text="Market:").grid(row=0, column=6, padx=5, pady=5, sticky="w")
         self.market_var = ctk.StringVar(value="NSE")
         self.market_option = ctk.CTkOptionMenu(add_frame, variable=self.market_var, values=["NSE", "BSE"])
         self.market_option.grid(row=0, column=7, padx=5, pady=5)
-
+        
         add_button = ctk.CTkButton(add_frame, text="Add Stock", command=self.add_stock)
         add_button.grid(row=0, column=8, padx=10, pady=5)
-
+        
+        delete_button = ctk.CTkButton(add_frame, text="Delete Selected Stock", command=self.delete_stock)
+        delete_button.grid(row=0, column=9, padx=10, pady=5)
+        
         port_frame = ctk.CTkFrame(frame)
         port_frame.pack(padx=10, pady=10, fill="both", expand=True)
-
-        columns = ("Ticker", "Shares", "Buy Price", "Market")
-        self.portfolio_tree = ttk.Treeview(port_frame, columns=columns, show="headings", height=10)
+        
+        # Set up custom style for Treeview to have light grey columns
+        style = ttk.Style()
+        style.configure("Custom.Treeview", 
+                        background="lightgrey", 
+                        fieldbackground="lightgrey", 
+                        foreground="black")
+        
+        columns = ("Sl. No", "Ticker", "Market", "Shares", "Buy Price", "Current Price", "Profit/Loss")
+        self.portfolio_tree = ttk.Treeview(port_frame, columns=columns, show="headings", height=10, style="Custom.Treeview")
         for col in columns:
             self.portfolio_tree.heading(col, text=col)
             self.portfolio_tree.column(col, anchor="center", width=100)
         self.portfolio_tree.pack(fill="both", expand=True, padx=10, pady=10)
         self.update_portfolio_display()
-
-    def create_trade_tools(self, frame):
+    
+    # ----------------- Trade Tools Content -----------------
+    def create_trade_tools_content(self, frame):
         input_frame = ctk.CTkFrame(frame)
         input_frame.pack(padx=10, pady=10, fill="x")
-
+        
         ctk.CTkLabel(input_frame, text="Ticker:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
         self.chart_ticker_entry = ctk.CTkEntry(input_frame, width=100)
         self.chart_ticker_entry.grid(row=0, column=1, padx=5, pady=5)
-
+        
         ctk.CTkLabel(input_frame, text="Market:").grid(row=0, column=2, padx=5, pady=5, sticky="w")
         self.chart_market_var = ctk.StringVar(value="NSE")
         self.chart_market_option = ctk.CTkOptionMenu(input_frame, variable=self.chart_market_var, values=["NSE", "BSE"])
         self.chart_market_option.grid(row=0, column=3, padx=5, pady=5)
-
+        
         display_button = ctk.CTkButton(input_frame, text="Display Chart", command=self.display_chart)
         display_button.grid(row=0, column=4, padx=10, pady=5)
-
+        
         rec_frame = ctk.CTkFrame(frame)
         rec_frame.pack(padx=10, pady=10, fill="x")
         self.rec_label = ctk.CTkLabel(rec_frame, text="No recommendation available. Enter ticker & market.", font=("Arial", 12, "italic"))
         self.rec_label.pack(padx=10, pady=10)
-
+        
         chart_frame = ctk.CTkFrame(frame)
         chart_frame.pack(padx=10, pady=10, fill="both", expand=True)
-
+        
         self.fig, self.ax = plt.subplots(figsize=(8, 4))
         self.ax.set_title("No chart available")
-        self.ax.text(0.5, 0.5, "Enter ticker and market to display chart", 
-                     horizontalalignment='center', verticalalignment='center', transform=self.ax.transAxes)
+        self.ax.text(0.5, 0.5, "Enter ticker and market to display chart", horizontalalignment='center', verticalalignment='center', transform=self.ax.transAxes)
         self.ax.set_xticks([]); self.ax.set_yticks([])
-
+        
         self.canvas = FigureCanvasTkAgg(self.fig, master=chart_frame)
         self.canvas.draw()
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
-
-    def create_analytics(self, frame):
+    
+    # ----------------- Analytics Content -----------------
+    def create_analytics_content(self, frame):
         main_frame = ctk.CTkFrame(frame)
         main_frame.pack(padx=10, pady=10, fill="both", expand=True)
-
+        
         top_frame = ctk.CTkFrame(main_frame)
         top_frame.pack(fill="x", pady=5)
-
+        
         summary_box = ctk.CTkFrame(top_frame)
         summary_box.pack(side="left", fill="both", expand=True, padx=(0,5))
         summary_label_title = ctk.CTkLabel(summary_box, text="Portfolio Summary", font=("Arial", 14, "bold"))
         summary_label_title.pack(pady=(10,5))
         self.summary_label = ctk.CTkLabel(summary_box, text="Loading summary...", font=("Arial", 12))
         self.summary_label.pack(pady=10)
-
+        
         pie_box = ctk.CTkFrame(top_frame)
         pie_box.pack(side="left", fill="both", expand=True, padx=(5,0))
         pie_label_title = ctk.CTkLabel(pie_box, text="Portfolio Composition", font=("Arial", 14, "bold"))
@@ -254,67 +322,96 @@ class StockManagerGUI(ctk.CTk):
         self.pie_canvas = FigureCanvasTkAgg(self.pie_fig, master=pie_box)
         self.pie_canvas.draw()
         self.pie_canvas.get_tk_widget().pack(fill="both", expand=True, padx=10, pady=10)
-
+        
         table_box = ctk.CTkFrame(main_frame)
         table_box.pack(fill="both", expand=True, pady=10)
         table_title = ctk.CTkLabel(table_box, text="Profit/Loss Details", font=("Arial", 14, "bold"))
         table_title.pack(pady=(10,5))
-
+        
         table_columns = ("Ticker", "Shares", "Buy Price", "Current Price", "Current Value", "P/L", "P/L %")
         self.pl_tree = ttk.Treeview(table_box, columns=table_columns, show="headings", height=8)
         for col in table_columns:
             self.pl_tree.heading(col, text=col)
             self.pl_tree.column(col, anchor="center", width=100)
         self.pl_tree.pack(fill="both", expand=True, padx=10, pady=10)
-
+    
     def add_stock(self):
         ticker = self.ticker_entry.get().strip()
         shares_str = self.shares_entry.get().strip()
         buy_price_str = self.buy_price_entry.get().strip()
         market = self.market_var.get()
-
         if not ticker or not shares_str or not buy_price_str:
             messagebox.showwarning("Input Error", "Please fill in all fields.")
             return
-
         try:
             shares = float(shares_str)
             buy_price = float(buy_price_str)
         except ValueError:
             messagebox.showwarning("Input Error", "Shares and Buy Price must be numbers.")
             return
-
+        
         self.stock_manager.add_stock(ticker, shares, buy_price, market)
         messagebox.showinfo("Success", f"Added {get_full_ticker(ticker, market)} ({market}) to portfolio.")
         self.ticker_entry.delete(0, tk.END)
         self.shares_entry.delete(0, tk.END)
         self.buy_price_entry.delete(0, tk.END)
         self.update_portfolio_display()
-
+    
+    def delete_stock(self):
+        selected = self.portfolio_tree.selection()
+        if not selected:
+            messagebox.showwarning("Selection Error", "Please select a stock to delete.")
+            return
+        for item in selected:
+            values = self.portfolio_tree.item(item, "values")
+            full_ticker = values[1]  # Now column 1 is Ticker? Adjust if necessary.
+            # In our dashboard table, column order is:
+            # Sl. No, Ticker, Market, Shares, Buy Price, Current Price, Profit/Loss
+            # So the ticker is in column 1.
+            self.stock_manager.delete_stock(full_ticker)
+        messagebox.showinfo("Success", "Selected stock(s) deleted.")
+        self.update_portfolio_display()
+    
     def update_portfolio_display(self):
+        # Clear the Treeview
         for row in self.portfolio_tree.get_children():
             self.portfolio_tree.delete(row)
+        # Populate with updated data along with computed live price and P/L
+        count = 1
         for full_ticker, data in self.stock_manager.portfolio.items():
-            self.portfolio_tree.insert(
-                "", tk.END,
-                values=(full_ticker, data['shares'], data['buy_price'], data['market'])
-            )
-
+            live_price = self.stock_manager.fetch_live_price(full_ticker)
+            if live_price is None:
+                current_price = "N/A"
+                profit_loss = "N/A"
+            else:
+                current_price = f"{live_price:.2f}"
+                profit_loss = f"{(live_price - data['buy_price']) * data['shares']:.2f}"
+            self.portfolio_tree.insert("", tk.END, values=(
+                count,
+                full_ticker,
+                data['market'],
+                data['shares'],
+                f"{data['buy_price']:.2f}",
+                current_price,
+                profit_loss
+            ))
+            count += 1
+    
     def display_chart(self):
         ticker = self.chart_ticker_entry.get().strip()
         market = self.chart_market_var.get()
         if not ticker:
             messagebox.showwarning("Input Error", "Please enter a ticker.")
             return
-
+        
         recommendation = self.stock_manager.recommend_trade(ticker, market.upper())
         self.rec_label.configure(text=recommendation)
-
+        
         hist, full_ticker = self.stock_manager.get_stock_chart_data(ticker, market)
         if hist is None or hist.empty:
             messagebox.showerror("Error", f"No data available for {full_ticker}")
             return
-
+        
         self.ax.clear()
         self.ax.plot(hist.index, hist['Close'], label='Close Price', color='blue')
         self.ax.set_title(f'{full_ticker} Stock Price (Last 6 Months)')
@@ -323,14 +420,14 @@ class StockManagerGUI(ctk.CTk):
         self.ax.legend(loc='best')
         self.ax.grid(True)
         self.canvas.draw()
-
+    
     def update_analytics(self):
         total_value = 0
         total_pl = 0
         pl_data = []
         labels = []
         sizes = []
-
+        
         for full_ticker, data in self.stock_manager.portfolio.items():
             live_price = self.stock_manager.fetch_live_price(full_ticker)
             if live_price is None:
@@ -340,12 +437,12 @@ class StockManagerGUI(ctk.CTk):
             current_value = live_price * shares
             pl = (live_price - buy_price) * shares
             pl_percent = ((live_price - buy_price) / buy_price * 100) if buy_price != 0 else 0
-
+            
             total_value += current_value
             total_pl += pl
             labels.append(full_ticker)
             sizes.append(current_value)
-
+            
             pl_data.append({
                 "Ticker": full_ticker,
                 "Shares": shares,
@@ -355,10 +452,10 @@ class StockManagerGUI(ctk.CTk):
                 "P/L": f"{pl:.2f}",
                 "P/L %": f"{pl_percent:.2f}%"
             })
-
+        
         summary_text = f"Total Portfolio Value: ₹{total_value:,.2f}\nTotal Profit/Loss: ₹{total_pl:,.2f}"
         self.summary_label.configure(text=summary_text)
-
+        
         self.pie_ax.clear()
         if sizes:
             self.pie_ax.pie(sizes, labels=labels, autopct='%1.1f%%', startangle=140)
@@ -366,7 +463,7 @@ class StockManagerGUI(ctk.CTk):
         else:
             self.pie_ax.text(0.5, 0.5, "No data", horizontalalignment='center', verticalalignment='center')
         self.pie_canvas.draw()
-
+        
         for row in self.pl_tree.get_children():
             self.pl_tree.delete(row)
         for item in pl_data:
